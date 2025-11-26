@@ -1,0 +1,188 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score,
+                             confusion_matrix, classification_report, roc_auc_score, roc_curve)
+
+try:
+    from xgboost import XGBClassifier
+    has_xgb = True
+except:
+    has_xgb = False
+
+RANDOM_STATE = 42
+np.random.seed(RANDOM_STATE)
+
+FINAL_DATASET_PATH = 'final_compiled_dataset.csv'
+RAW_SYNTHETIC_PATH = 'fake_social_accounts.csv'
+PREDICTIONS_PATH = 'predictions_test_set.csv'
+
+// 1) DATA LOADING
+def generate_sample_dataset(n=1000, seed=RANDOM_STATE):
+    np.random.seed(seed)
+    df = pd.DataFrame({
+        'follower_count': np.random.randint(1, 10000, n),
+        'following_count': np.random.randint(1, 5000, n),
+        'posts_count': np.random.randint(0, 500, n),
+        'likes_count': np.random.randint(0, 10000, n),
+        'account_age_days': np.random.randint(1, 3650, n),
+        'is_fake': np.random.choice([0, 1], n, p=[0.7, 0.3])
+    })
+    df.to_csv(RAW_SYNTHETIC_PATH, index=False)
+    print(f"Saved raw synthetic CSV: {RAW_SYNTHETIC_PATH}")
+    return df
+
+df = generate_sample_dataset(n=1000)
+print("Loaded dataset:", df.shape)
+print(df.head())
+
+// 2) DATA INSPECTION
+print("\n--- DATA INSPECTION ---")
+df.info()
+print(df.describe())
+print(df.isna().sum())
+print(df.nunique())
+print(df.dtypes)
+print(df.corr())
+
+// 3) DATA PROCESSING
+raw = df.copy()
+
+Q1 = df['follower_count'].quantile(0.25)
+Q3 = df['follower_count'].quantile(0.75)
+IQR = Q3 - Q1
+lower_bound = Q1 - 1.5 * IQR
+upper_bound = Q3 + 1.5 * IQR
+df['follower_count'] = df['follower_count'].clip(lower=lower_bound, upper=upper_bound)
+
+raw['follower_to_following_ratio'] = raw['follower_count'] / (raw['following_count'] + 1)
+df['follower_to_following_ratio'] = raw['follower_to_following_ratio']
+
+numeric_cols = ['follower_count', 'following_count', 'posts_count', 'likes_count',
+                'account_age_days', 'follower_to_following_ratio']
+scaler = StandardScaler()
+df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
+
+print("\nProcessed shape:", df.shape)
+df.to_csv(FINAL_DATASET_PATH, index=False)
+print(f"Saved processed dataset: {FINAL_DATASET_PATH}")
+
+// 4) EDA
+plt.figure(figsize=(10,6))
+sns.heatmap(df[numeric_cols + ['is_fake']].corr(), annot=True, cmap='viridis')
+plt.title('Correlation Heatmap')
+plt.show()
+
+plt.hist(raw['follower_count'], bins=30)
+plt.title('Histogram: follower_count')
+plt.show()
+
+sns.boxplot(y=raw['likes_count'])
+plt.title('Boxplot: likes_count')
+plt.show()
+
+sns.countplot(x=raw['is_fake'])
+plt.title('Countplot: is_fake')
+plt.show()
+
+// 5) FEATURES
+X = df[numeric_cols].copy()
+y = df['is_fake'].copy()
+print("Features:", list(X.columns))
+
+// 6) TRAIN/TEST SPLIT
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2,random_state=RANDOM_STATE, stratify=y)
+
+// 7) MODEL HELPER
+def train_and_evaluate(model, name, X_train, y_train, X_test, y_test):
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    y_pred_train = model.predict(X_train)
+    proba = model.predict_proba(X_test)[:,1] if hasattr(model, 'predict_proba') else None
+
+    results = {
+        'train_accuracy': accuracy_score(y_train, y_pred_train),
+        'test_accuracy': accuracy_score(y_test, y_pred),
+        'precision': precision_score(y_test, y_pred, zero_division=0),
+        'recall': recall_score(y_test, y_pred, zero_division=0),
+        'f1': f1_score(y_test, y_pred, zero_division=0),
+        'confusion_matrix': confusion_matrix(y_test, y_pred).tolist(),
+        'classification_report': classification_report(y_test, y_pred, zero_division=0)
+    }
+
+    if proba is not None:
+        results['roc_auc'] = roc_auc_score(y_test, proba)
+        fpr, tpr, thr = roc_curve(y_test, proba)
+        results['roc_curve'] = {'fpr': fpr.tolist(), 'tpr': tpr.tolist(), 'thresholds': thr.tolist()}
+    else:
+        results['roc_auc'] = None
+        results['roc_curve'] = None
+
+    print(f"\n===== {name} METRICS =====")
+    print("Train accuracy:", results['train_accuracy'])
+    print("Test accuracy:", results['test_accuracy'])
+    print("Precision:", results['precision'])
+    print("Recall:", results['recall'])
+    print("F1-score:", results['f1'])
+    print("Confusion matrix:")
+    print(np.array(results['confusion_matrix']))
+
+    return results
+
+// 8) TRAIN MODELS
+all_results = {}
+
+lr = LogisticRegression(max_iter=1000, random_state=RANDOM_STATE)
+all_results['LogisticRegression'] = train_and_evaluate(lr, 'LogisticRegression', X_train, y_train, X_test, y_test)
+
+rf = RandomForestClassifier(random_state=RANDOM_STATE, n_jobs=-1)
+rf_grid = {'n_estimators': [100], 'max_depth': [5, 10], 'min_samples_split': [2, 5]}
+rf_gs = GridSearchCV(rf, rf_grid, cv=3, scoring='accuracy', n_jobs=-1)
+rf_gs.fit(X_train, y_train)
+best_rf = rf_gs.best_estimator_
+print("\nRF best params:", rf_gs.best_params_)
+all_results['RandomForest'] = train_and_evaluate(best_rf, 'RandomForest', X_train, y_train, X_test, y_test)
+
+if has_xgb:
+    xgb = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=RANDOM_STATE)
+    all_results['XGBoost'] = train_and_evaluate(xgb, 'XGBoost', X_train, y_train, X_test, y_test)
+else:
+    print("\nXGBoost not installed, skipped.")
+
+// 9) SAVE PREDICTIONS
+best_model_name = max(all_results.items(), key=lambda kv: kv[1]['test_accuracy'])[0]
+print("\nBest model:", best_model_name)
+
+final_model = {'RandomForest': best_rf, 'LogisticRegression': lr}.get(best_model_name, best_rf)
+final_model.fit(X_train, y_train)
+
+preds = final_model.predict(X_test)
+probs = final_model.predict_proba(X_test)[:,1]
+out_df = X_test.reset_index(drop=True).copy()
+out_df['true_label'] = y_test.reset_index(drop=True)
+out_df['pred_label'] = preds
+out_df['pred_proba'] = probs
+out_df.to_csv(PREDICTIONS_PATH, index=False)
+print(f"Saved predictions: {PREDICTIONS_PATH}")
+
+// ROC PLOT
+plt.figure(figsize=(8,6))
+for name,res in all_results.items():
+    roc = res.get('roc_curve')
+    if roc and roc['fpr']:
+        plt.plot(roc['fpr'], roc['tpr'], label=f"{name} (AUC={res['roc_auc']:.3f})")
+plt.plot([0,1],[0,1],'k--')
+plt.xlabel('FPR')
+plt.ylabel('TPR')
+plt.title('ROC Curves')
+plt.legend()
+plt.show()
+
+print("\nSample predictions:")
+print(out_df.head())

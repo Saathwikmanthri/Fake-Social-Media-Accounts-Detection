@@ -13,8 +13,7 @@ from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKF
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score,
-                             confusion_matrix, classification_report, roc_auc_score, roc_curve, auc)
+from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score,confusion_matrix, classification_report, roc_auc_score, roc_curve, auc)
 try:
     from xgboost import XGBClassifier
     has_xgb = True
@@ -24,7 +23,7 @@ except Exception:
 RANDOM_STATE = 42
 np.random.seed(RANDOM_STATE)
 
-DATA_PATH = "instagram_dataset.csv"   
+DATA_PATH = "instagram_dataset.csv"
 FINAL_CSV = "fake_social_accounts.csv"
 if not os.path.exists(DATA_PATH):
     raise FileNotFoundError(f"Place your dataset as '{DATA_PATH}' in the working folder.")
@@ -76,7 +75,7 @@ for col in ['follower_count','following_count','posts_count']:
     high = df_proc[col].quantile(0.99)
     df_proc[col] = df_proc[col].clip(lower=low, upper=high)
 
-# Feature engineering (innovative features) - worth 3.5 marks for innovation
+# Feature engineering (innovative features)
 df_proc['username_len'] = pd.to_numeric(df.get('nums_length_username', df.get('nums_length_username', df.get('nums_length_username'))), errors='coerce').fillna(0).astype(float)
 df_proc['fullname_words'] = pd.to_numeric(df.get('fullname_words', df.get('fullname_words')), errors='coerce').fillna(0).astype(float)
 df_proc['name_equal_username'] = pd.to_numeric(df.get('name==username', df.get('name__username', df.get('name==username'))), errors='coerce').fillna(0).astype(int)
@@ -111,7 +110,7 @@ y = df_proc['is_fake'].copy()
 
 print("\nFinal feature columns used:", feature_cols)
 
-# Scaling 
+# Scaling
 scaler = StandardScaler()
 X_scaled = pd.DataFrame(scaler.fit_transform(X), columns=X.columns, index=X.index)
 
@@ -169,11 +168,41 @@ best_rf = rf_gs.best_estimator_
 models['RandomForest'] = best_rf
 print("RandomForest best params:", rf_gs.best_params_)
 
-# XGBoost (optional)
+# XGBoost with hyperparameter tuning (new feature)
 if has_xgb:
-    xgb = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=RANDOM_STATE)
-    xgb.fit(X_train, y_train)
-    models['XGBoost'] = xgb
+    from xgboost import XGBClassifier
+
+    xgb_base = XGBClassifier(
+        objective='binary:logistic',
+        eval_metric='logloss',
+        random_state=RANDOM_STATE,
+        tree_method='hist',   # fast, works well for tabular data
+        n_jobs=-1
+    )
+
+    xgb_param_grid = {
+        'n_estimators': [100, 200],
+        'max_depth': [3, 5, 7],
+        'learning_rate': [0.01, 0.1, 0.3],
+        'subsample': [0.8, 1.0],
+        'colsample_bytree': [0.8, 1.0]
+    }
+
+    xgb_gs = GridSearchCV(
+        estimator=xgb_base,
+        param_grid=xgb_param_grid,
+        cv=3,
+        scoring='roc_auc',
+        n_jobs=-1,
+        verbose=1
+    )
+
+    xgb_gs.fit(X_train, y_train)
+
+    best_xgb = xgb_gs.best_estimator_
+    print("XGBoost best params:", xgb_gs.best_params_)
+
+    models['XGBoost'] = best_xgb
 else:
     print("XGBoost not available; skipped.")
 def evaluate_model(model, Xtr, ytr, Xts, yts, thresh=0.5):
@@ -198,12 +227,12 @@ for name, model in models.items():
     res = evaluate_model(model, X_train, y_train, X_val, y_val, thresh=0.5)
     print(f"\n{name} on validation (threshold 0.5): Train acc={res['train_accuracy']:.3f}, Val acc={res['test_accuracy']:.3f}")
     all_results[name] = {'model': model, 'val_stats': res}
-    
+
 desired_min = 0.88
 desired_max = 0.98
 
 def find_threshold_for_accuracy(model, Xv, yv, target_min=desired_min, target_max=desired_max):
-    # use predicted probabilities on validation set
+
     if not hasattr(model,'predict_proba'):
         return 0.5, None, None
     probs = model.predict_proba(Xv)[:,1]
@@ -211,7 +240,7 @@ def find_threshold_for_accuracy(model, Xv, yv, target_min=desired_min, target_ma
     for t in np.linspace(0.01,0.99,99):
         y_pred = (probs >= t).astype(int)
         acc = accuracy_score(yv, y_pred)
-        # pick threshold that yields accuracy inside the target range (prefer highest f1 if multiple)
+
         if target_min <= acc <= target_max:
             # compute f1 as tie-breaker
             f1 = f1_score(yv, y_pred, zero_division=0)
@@ -250,7 +279,7 @@ for name, info in all_results.items():
     print("F1-score:", stats['f1'])
     print("Confusion matrix:\n", stats['confusion_matrix'])
     print("ROC AUC:", stats['roc_auc'])
-print("\n--- SAMPLE PREDICTIONS (first up to 5 rows from test) ---")
+    print("\n--- SAMPLE PREDICTIONS (first up to 5 rows from test) ---")
 sample_idx = X_test.index[:5]
 sample_X = X_test.loc[sample_idx]
 sample_true = y_test.loc[sample_idx]
@@ -266,7 +295,7 @@ for name, info in final_evals.items():
     else:
         preds = model.predict(sample_X)
         print(f"\nModel: {name} (no probs) Predictions:", preds.tolist())
-print("\n--- STATISTICAL OUTCOMES (summary per model) ---")
+        print("\n--- STATISTICAL OUTCOMES (summary per model) ---")
 for name, stats in final_evals.items():
     print(f"\nModel: {name}")
     print("Test Accuracy:", stats['test_accuracy'])
@@ -276,7 +305,7 @@ for name, stats in final_evals.items():
     print("F1:", stats['f1'])
     print("Confusion Matrix:\n", stats['confusion_matrix'])
     print("ROC AUC:", stats['roc_auc'])
-plt.figure(figsize=(8,6))
+    plt.figure(figsize=(8,6))
 for name, stats in final_evals.items():
     fpr, tpr, thr = stats.get('roc_curve', (None,None,None))
     if fpr is not None:
@@ -290,7 +319,7 @@ plt.show()
 print("\n--- SUMMARY ---")
 for name, stats in final_evals.items():
     print(f"{name}: Test acc = {stats['test_accuracy']:.4f}, ROC AUC = {stats['roc_auc']:.4f}")
-
-
-import os
+    
+ # to check what files are inserted 
+ import os
 os.listdir()
